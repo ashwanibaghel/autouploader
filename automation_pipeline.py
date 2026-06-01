@@ -180,7 +180,9 @@ def validate_voiceover_duration(story, voiceover_path: Path) -> str:
     if actual_duration <= hard_max_duration:
         target_duration = ideal_max_duration
         fixed_path = OUTPUT_DIR / f"{story.story_id}_voiceover_fixed.wav"
-        speed_up_voiceover(voiceover_path, fixed_path, actual_duration / target_duration)
+        speed_factor = actual_duration / target_duration
+        speed_up_voiceover(voiceover_path, fixed_path, speed_factor)
+        copy_adjusted_timing_sidecar(voiceover_path, fixed_path, speed_factor)
         logging.info(
             "Voice-over for %s was %.1fs; speed-corrected to %.1fs.",
             story.story_id,
@@ -223,6 +225,19 @@ def build_atempo_filters(speed_factor: float) -> str:
         remaining /= 2.0
     factors.append(remaining)
     return ",".join(f"atempo={factor:.4f}" for factor in factors)
+
+
+def copy_adjusted_timing_sidecar(input_path: Path, output_path: Path, speed_factor: float) -> None:
+    input_sidecar = input_path.with_suffix(".timings.json")
+    if not input_sidecar.exists():
+        return
+
+    data = json.loads(input_sidecar.read_text(encoding="utf-8"))
+    durations = [float(value) / speed_factor for value in data.get("screen_durations", [])]
+    output_path.with_suffix(".timings.json").write_text(
+        json.dumps({"screen_durations": durations}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

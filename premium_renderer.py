@@ -1,4 +1,5 @@
 import logging
+import json
 import random
 import re
 import subprocess
@@ -48,8 +49,12 @@ def render_premium_story(
     screens = split_into_story_screens(story.body)
     timings = calculate_screen_timings(screens)
     if voiceover_path:
-        voiceover_duration = get_media_duration_seconds(voiceover_path)
-        timings = align_timings_to_voiceover(timings, voiceover_duration)
+        screen_durations = load_voiceover_screen_durations(voiceover_path, len(screens))
+        if screen_durations:
+            timings = apply_screen_durations(timings, screen_durations)
+        else:
+            voiceover_duration = get_media_duration_seconds(voiceover_path)
+            timings = align_timings_to_voiceover(timings, voiceover_duration)
     total_duration = INTRO_SECONDS + sum(duration for _, duration in timings) + OUTRO_SECONDS
     audio_path = pick_music_track(story.mood)
 
@@ -105,6 +110,41 @@ def calculate_screen_timings(screens: list[dict]) -> list[tuple[dict, float]]:
         durations = raw_durations
 
     return list(zip(screens, durations))
+
+
+def load_voiceover_screen_durations(voiceover_path: Path, expected_count: int) -> list[float] | None:
+    sidecar_path = voiceover_path.with_suffix(".timings.json")
+    if not sidecar_path.exists():
+        return None
+
+    data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    durations = [float(value) for value in data.get("screen_durations", [])]
+    if len(durations) != expected_count:
+        logger.warning(
+            "Ignoring voice timing sidecar with %s durations for %s screens: %s",
+            len(durations),
+            expected_count,
+            sidecar_path,
+        )
+        return None
+    return durations
+
+
+def apply_screen_durations(
+    timings: list[tuple[dict, float]],
+    screen_durations: list[float],
+) -> list[tuple[dict, float]]:
+    durations = [
+        max(2.15, min(7.2 if screen["golden"] else 6.6, duration + 0.35))
+        for (screen, _), duration in zip(timings, screen_durations)
+    ]
+
+    total = sum(durations)
+    if total > STORY_BUDGET_SECONDS:
+        scale = STORY_BUDGET_SECONDS / total
+        durations = [max(1.85, duration * scale) for duration in durations]
+
+    return [(screen, duration) for (screen, _), duration in zip(timings, durations)]
 
 
 def align_timings_to_voiceover(
