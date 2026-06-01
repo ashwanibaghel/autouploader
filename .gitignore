@@ -26,6 +26,7 @@ videos/*.mp4
 
 # Local API settings
 .env
+github_secrets/
 
 # Local logs
 *.log
