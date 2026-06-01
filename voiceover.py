@@ -1,8 +1,10 @@
 import logging
 import mimetypes
 import os
+import random
 import re
 import struct
+import time
 from pathlib import Path
 
 from google import genai
@@ -20,6 +22,7 @@ def generate_story_voiceover(
     output_dir: Path = OUTPUT_DIR,
     model: str = GEMINI_TTS_MODEL,
     voice_name: str = GEMINI_TTS_VOICE,
+    max_attempts: int = 4,
 ) -> Path:
     """Generate a soft emotional Hindi/Hinglish voice-over for a story."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -47,25 +50,52 @@ def generate_story_voiceover(
 
     audio_chunks: list[bytes] = []
     mime_type = ""
+    last_error: Exception | None = None
 
-    logger.info("Generating Gemini voice-over with model %s", model)
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=[prompt],
-        config=config,
-    ):
-        for part in iter_response_parts(chunk):
-            inline_data = getattr(part, "inline_data", None)
-            if inline_data and inline_data.data:
-                mime_type = inline_data.mime_type or mime_type
-                audio_chunks.append(inline_data.data)
+    for attempt in range(1, max_attempts + 1):
+        audio_chunks = []
+        mime_type = ""
+        try:
+            logger.info(
+                "Generating Gemini voice-over with model %s (attempt %s/%s)",
+                model,
+                attempt,
+                max_attempts,
+            )
+            for chunk in client.models.generate_content_stream(
+                model=model,
+                contents=[prompt],
+                config=config,
+            ):
+                for part in iter_response_parts(chunk):
+                    inline_data = getattr(part, "inline_data", None)
+                    if inline_data and inline_data.data:
+                        mime_type = inline_data.mime_type or mime_type
+                        audio_chunks.append(inline_data.data)
 
-        text = getattr(chunk, "text", None)
-        if text:
-            logger.info("Gemini TTS text response: %s", text.strip())
+                text = getattr(chunk, "text", None)
+                if text:
+                    logger.info("Gemini TTS text response: %s", text.strip())
+
+            if audio_chunks:
+                break
+            last_error = RuntimeError("Gemini did not return audio data.")
+        except Exception as error:
+            last_error = error
+
+        if attempt < max_attempts:
+            sleep_seconds = min(45.0, (2**attempt) + random.uniform(1.0, 4.0))
+            logger.warning(
+                "Gemini voice-over attempt %s/%s failed: %s. Retrying in %.1fs.",
+                attempt,
+                max_attempts,
+                last_error,
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
 
     if not audio_chunks:
-        raise RuntimeError("Gemini did not return audio data.")
+        raise RuntimeError("Gemini did not return audio data.") from last_error
 
     audio_data = b"".join(audio_chunks)
     output_path.write_bytes(normalize_audio_bytes(audio_data, mime_type))
