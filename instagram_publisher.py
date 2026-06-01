@@ -70,6 +70,26 @@ def publish_instagram_reel(
     return {"media_id": media_id, "permalink": permalink or "", "video_url": final_video_url}
 
 
+def validate_instagram_credentials() -> dict:
+    load_dotenv_if_present()
+    access_token = require_env(INSTAGRAM_ACCESS_TOKEN_ENV)
+    ig_user_id = require_env(INSTAGRAM_USER_ID_ENV)
+    graph_base_url = get_graph_base_url()
+
+    response = requests.get(
+        f"{graph_base_url}/me",
+        params={"fields": "id,username,account_type", "access_token": access_token},
+        timeout=30,
+    )
+    payload = parse_graph_response(response)
+    if str(payload.get("id")) != str(ig_user_id):
+        raise RuntimeError(
+            f"INSTAGRAM_USER_ID mismatch. Secret has {ig_user_id}, token returned {payload.get('id')}."
+        )
+    logger.info("Instagram token validated for @%s", payload.get("username") or "")
+    return payload
+
+
 def create_reel_container(
     ig_user_id: str,
     graph_base_url: str,
@@ -190,6 +210,11 @@ def parse_graph_response(response: requests.Response) -> dict:
 
 def require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
+    if "=" in value:
+        key, possible_value = value.split("=", 1)
+        if key.strip() == name:
+            value = possible_value.strip()
+    value = value.strip().strip('"').strip("'")
     if not value:
         raise RuntimeError(f"Missing {name}. Add it to .env.")
     return value

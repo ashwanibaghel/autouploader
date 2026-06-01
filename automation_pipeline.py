@@ -6,7 +6,7 @@ from pathlib import Path
 
 from cloudinary_uploader import upload_video_to_cloudinary
 from config import APPROVED_STORIES_DIR, LOGS_DIR, OUTPUT_DIR, UPLOADS_DIR
-from instagram_publisher import publish_instagram_reel
+from instagram_publisher import publish_instagram_reel, validate_instagram_credentials
 from premium_renderer import calculate_screen_timings, get_media_duration_seconds, render_premium_story, split_into_story_screens
 from publish_state import record_published_story
 from publishing_metadata import build_instagram_caption, build_youtube_metadata
@@ -57,6 +57,10 @@ def main() -> None:
         if args.story
         else find_pending_approved_story(args.stories_dir, selection=args.selection)
     )
+
+    if args.upload_instagram:
+        validate_instagram_credentials()
+
     voiceover_path = None
     if not args.no_voiceover:
         cached_voiceover = OUTPUT_DIR / f"{story.story_id}_voiceover.wav"
