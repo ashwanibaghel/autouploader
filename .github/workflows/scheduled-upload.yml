@@ -33,6 +33,9 @@ jobs:
         run: |
           @"
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          TTS_PROVIDER=gtts
+          GTTS_LANGUAGE=hi
+          EDGE_TTS_VOICE=hi-IN-MadhurNeural
           INSTAGRAM_ACCESS_TOKEN=${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_USER_ID=${{ secrets.INSTAGRAM_USER_ID }}
           INSTAGRAM_GRAPH_BASE_URL=https://graph.instagram.com

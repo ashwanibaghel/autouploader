@@ -1,10 +1,12 @@
 import logging
+import asyncio
 import json
 import mimetypes
 import os
 import random
 import re
 import struct
+import subprocess
 import time
 import wave
 from pathlib import Path
@@ -12,7 +14,19 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-from config import GEMINI_API_KEY_ENV, GEMINI_TTS_MODEL, GEMINI_TTS_VOICE, OUTPUT_DIR, PROJECT_ROOT
+from config import (
+    DEFAULT_EDGE_TTS_VOICE,
+    DEFAULT_TTS_PROVIDER,
+    EDGE_TTS_VOICE_ENV,
+    GEMINI_API_KEY_ENV,
+    GEMINI_TTS_MODEL,
+    GEMINI_TTS_VOICE,
+    DEFAULT_GTTS_LANGUAGE,
+    GTTS_LANGUAGE_ENV,
+    OUTPUT_DIR,
+    PROJECT_ROOT,
+    TTS_PROVIDER_ENV,
+)
 from premium_renderer import get_media_duration_seconds, split_into_story_screens
 from story_loader import Story
 
@@ -31,13 +45,21 @@ def generate_story_voiceover(
     output_dir.mkdir(parents=True, exist_ok=True)
     load_dotenv_if_present()
 
+    screens = split_into_story_screens(story.body)
+    provider = os.environ.get(TTS_PROVIDER_ENV, DEFAULT_TTS_PROVIDER).strip().lower()
+    if provider == "gtts":
+        return generate_gtts_story_voiceover(story, screens, output_dir)
+    if provider == "edge":
+        try:
+            return generate_edge_story_voiceover(story, screens, output_dir)
+        except Exception as error:
+            logger.warning("Edge TTS failed, falling back to gTTS: %s", error)
+            return generate_gtts_story_voiceover(story, screens, output_dir)
+
     api_key = os.environ.get(GEMINI_API_KEY_ENV)
     if not api_key:
-        raise RuntimeError(
-            f"Missing {GEMINI_API_KEY_ENV}. Add it to .env before generating voice-over."
-        )
+        raise RuntimeError(f"Missing {GEMINI_API_KEY_ENV}. Add it to .env before generating voice-over.")
 
-    screens = split_into_story_screens(story.body)
     if len(screens) > 1:
         return generate_chunked_story_voiceover(
             story=story,
@@ -115,6 +137,106 @@ def generate_story_voiceover(
     output_path.write_bytes(normalize_audio_bytes(audio_data, mime_type))
     logger.info("Saved voice-over: %s", output_path)
     return output_path
+
+
+def generate_edge_story_voiceover(
+    story: Story,
+    screens: list[dict],
+    output_dir: Path,
+) -> Path:
+    output_path = output_dir / f"{story.story_id}_voiceover.wav"
+    chunks_dir = output_dir / "_voice_chunks" / story.story_id
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    voice = os.environ.get(EDGE_TTS_VOICE_ENV, DEFAULT_EDGE_TTS_VOICE).strip() or DEFAULT_EDGE_TTS_VOICE
+
+    chunk_paths = []
+    screen_durations = []
+    for index, screen in enumerate(screens, start=1):
+        text = " ".join(screen["lines"])
+        chunk_path = chunks_dir / f"{index:03d}_edge.wav"
+        mp3_path = chunks_dir / f"{index:03d}_edge.mp3"
+        asyncio.run(generate_edge_tts_mp3(text, mp3_path, voice))
+        convert_audio_to_wav(mp3_path, chunk_path)
+        duration = get_media_duration_seconds(chunk_path)
+        if duration < 0.45:
+            raise RuntimeError(f"Generated Edge voice chunk is too short for {story.story_id} screen {index}.")
+        chunk_paths.append(chunk_path)
+        screen_durations.append(duration + 0.24)
+
+    concatenate_wav_chunks(chunk_paths, output_path, pause_seconds=0.16)
+    if screen_durations:
+        screen_durations[-1] = max(0.45, screen_durations[-1] - 0.16)
+    write_timing_sidecar(output_path, screen_durations)
+    logger.info("Saved Edge chunked voice-over: %s", output_path)
+    return output_path
+
+
+def generate_gtts_story_voiceover(
+    story: Story,
+    screens: list[dict],
+    output_dir: Path,
+) -> Path:
+    output_path = output_dir / f"{story.story_id}_voiceover.wav"
+    chunks_dir = output_dir / "_voice_chunks" / story.story_id
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    language = os.environ.get(GTTS_LANGUAGE_ENV, DEFAULT_GTTS_LANGUAGE).strip() or DEFAULT_GTTS_LANGUAGE
+
+    chunk_paths = []
+    screen_durations = []
+    for index, screen in enumerate(screens, start=1):
+        text = " ".join(screen["lines"])
+        chunk_path = chunks_dir / f"{index:03d}_gtts.wav"
+        mp3_path = chunks_dir / f"{index:03d}_gtts.mp3"
+        generate_gtts_mp3(text, mp3_path, language)
+        convert_audio_to_wav(mp3_path, chunk_path)
+        duration = get_media_duration_seconds(chunk_path)
+        if duration < 0.45:
+            raise RuntimeError(f"Generated gTTS voice chunk is too short for {story.story_id} screen {index}.")
+        chunk_paths.append(chunk_path)
+        screen_durations.append(duration + 0.22)
+
+    concatenate_wav_chunks(chunk_paths, output_path, pause_seconds=0.14)
+    if screen_durations:
+        screen_durations[-1] = max(0.45, screen_durations[-1] - 0.14)
+    write_timing_sidecar(output_path, screen_durations)
+    logger.info("Saved gTTS chunked voice-over: %s", output_path)
+    return output_path
+
+
+def generate_gtts_mp3(text: str, output_path: Path, language: str) -> None:
+    from gtts import gTTS
+
+    tts = gTTS(text=text, lang=language, tld="co.in", slow=False)
+    tts.save(str(output_path))
+
+
+async def generate_edge_tts_mp3(text: str, output_path: Path, voice: str) -> None:
+    import edge_tts
+
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate="+2%", volume="+0%")
+    await communicate.save(str(output_path))
+
+
+def convert_audio_to_wav(input_path: Path, output_path: Path) -> None:
+    import imageio_ffmpeg
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(input_path),
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ],
+        check=True,
+    )
 
 
 def generate_chunked_story_voiceover(

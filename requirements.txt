@@ -6,3 +6,5 @@ imageio-ffmpeg==0.6.0
 requests==2.34.2
 google-genai==1.16.1
 cloudinary==1.44.1
+edge-tts==7.0.0
+gTTS==2.5.4
