@@ -2,7 +2,10 @@ import argparse
 import json
 import logging
 import shutil
+import subprocess
 from pathlib import Path
+
+import imageio_ffmpeg
 
 from cloudinary_uploader import upload_video_to_cloudinary
 from config import APPROVED_STORIES_DIR, LOGS_DIR, OUTPUT_DIR, UPLOADS_DIR
@@ -63,9 +66,7 @@ def main() -> None:
 
     voiceover_path = None
     if not args.no_voiceover:
-        cached_voiceover = OUTPUT_DIR / f"{story.story_id}_voiceover.wav"
-        voiceover_path = cached_voiceover if cached_voiceover.exists() else generate_story_voiceover(story)
-        validate_voiceover_duration(story, voiceover_path)
+        voiceover_path = prepare_voiceover(story)
 
     result = render_premium_story(story, voiceover_path=voiceover_path)
     logging.info("Rendered video: %s", result.output_path)
@@ -132,20 +133,96 @@ def prepare_youtube_upload(video_path: Path, story) -> Path:
     return target_video
 
 
-def validate_voiceover_duration(story, voiceover_path: Path) -> None:
+def prepare_voiceover(story, max_quality_attempts: int = 3) -> Path:
+    voiceover_path = OUTPUT_DIR / f"{story.story_id}_voiceover.wav"
+
+    for attempt in range(1, max_quality_attempts + 1):
+        if not voiceover_path.exists():
+            voiceover_path = generate_story_voiceover(story)
+
+        result = validate_voiceover_duration(story, voiceover_path)
+        if result == "ok":
+            return voiceover_path
+        if result == "fixed":
+            return OUTPUT_DIR / f"{story.story_id}_voiceover_fixed.wav"
+
+        logging.warning(
+            "Voice-over quality check failed for %s on attempt %s/%s. Regenerating.",
+            story.story_id,
+            attempt,
+            max_quality_attempts,
+        )
+        voiceover_path.unlink(missing_ok=True)
+
+    raise RuntimeError(f"Could not generate a usable voice-over for {story.story_id}.")
+
+
+def validate_voiceover_duration(story, voiceover_path: Path) -> str:
     screens = split_into_story_screens(story.body)
     expected_duration = sum(duration for _, duration in calculate_screen_timings(screens))
     actual_duration = get_media_duration_seconds(voiceover_path)
     min_duration = max(8.0, expected_duration * 0.55)
-    max_duration = min(58.0, max(expected_duration * 1.55, expected_duration + 10.0))
+    ideal_max_duration = min(54.0, max(expected_duration * 1.25, expected_duration + 8.0))
+    hard_max_duration = min(72.0, max(expected_duration * 1.85, expected_duration + 20.0))
 
-    if actual_duration < min_duration or actual_duration > max_duration:
-        voiceover_path.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Voice-over duration looks wrong for {story.story_id}: "
-            f"{actual_duration:.1f}s generated, expected around {expected_duration:.1f}s. "
-            "Deleted the bad voice-over so the next run can regenerate it."
+    if actual_duration < min_duration:
+        logging.warning(
+            "Voice-over duration too short for %s: %.1fs generated, expected around %.1fs.",
+            story.story_id,
+            actual_duration,
+            expected_duration,
         )
+        return "bad"
+
+    if actual_duration <= ideal_max_duration:
+        return "ok"
+
+    if actual_duration <= hard_max_duration:
+        target_duration = ideal_max_duration
+        fixed_path = OUTPUT_DIR / f"{story.story_id}_voiceover_fixed.wav"
+        speed_up_voiceover(voiceover_path, fixed_path, actual_duration / target_duration)
+        logging.info(
+            "Voice-over for %s was %.1fs; speed-corrected to %.1fs.",
+            story.story_id,
+            actual_duration,
+            get_media_duration_seconds(fixed_path),
+        )
+        return "fixed"
+
+    logging.warning(
+        "Voice-over duration too long for %s: %.1fs generated, expected around %.1fs.",
+        story.story_id,
+        actual_duration,
+        expected_duration,
+    )
+    return "bad"
+
+
+def speed_up_voiceover(input_path: Path, output_path: Path, speed_factor: float) -> None:
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    filters = build_atempo_filters(speed_factor)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(input_path),
+            "-filter:a",
+            filters,
+            str(output_path),
+        ],
+        check=True,
+    )
+
+
+def build_atempo_filters(speed_factor: float) -> str:
+    factors = []
+    remaining = max(0.5, speed_factor)
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    factors.append(remaining)
+    return ",".join(f"atempo={factor:.4f}" for factor in factors)
 
 
 if __name__ == "__main__":
