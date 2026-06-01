@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local Google OAuth files
+client_secret.json
+token.json
+
+# Video files and generated metadata
+uploads/*.mp4
+uploads/*.mov
+uploads/*.m4v
+uploads/*.avi
+uploads/*.mkv
+uploads/*.json
+uploaded/
+downloads/
+output/
+logs/
+*.ass
+
+# Legacy/local sample media
+videos/*.mp4
+
+# Local API settings
+.env
+
+# Local logs
+*.log
